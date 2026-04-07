@@ -132,6 +132,12 @@ ros2 service call /ChatGPT_service llm_interfaces/srv/ChatGPT "{request_text: '�
 - 视觉模型能力融合
 - 持续性能与可扩展性优化
 
+## Foxy 适配记录
+
+针对 Ubuntu 20.04 + ROS2 Foxy 的实际排障与兼容改造总结，请查看：
+
+- [FOXY_ADAPTATION_SUMMARY.md](FOXY_ADAPTATION_SUMMARY.md)
+
 ## 贡献
 
 欢迎贡献代码与文档。提交 PR 前请先阅读 [CONTRIBUTING.md](CONTRIBUTING.md)。

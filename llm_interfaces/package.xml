@@ -12,7 +12,7 @@
   <!-- The interfaces rely on rosidl_default_generators for generating language-specific code -->
   <!-- you need to declare a dependency on it -->
   <!-- ROS Interfaces Settings https://docs.ros.org/en/crystal/Tutorials/Custom-ROS2-Interfaces.html -->
-  <build_depend>rosidl_default_generators</build_depend>
+  <buildtool_depend>rosidl_default_generators</buildtool_depend>
   <exec_depend>rosidl_default_runtime</exec_depend>
 
   <test_depend>ament_lint_auto</test_depend>

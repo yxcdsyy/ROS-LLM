@@ -27,8 +27,9 @@ import subprocess
 import rclpy
 from rclpy.node import Node
 from std_msgs.msg import String
-from geometry_msgs.msg import Pose
+from geometry_msgs.msg import Pose as GeometryPose
 from geometry_msgs.msg import Twist
+from turtlesim.msg import Pose as TurtlePose
 from llm_interfaces.srv import ChatGPT
 
 # Global Initialization
@@ -47,7 +48,7 @@ class MultiRobot(Node):
             if robot_name == "":
                 # pose publisher
                 self.pose_publishers[robot_name] = self.create_publisher(
-                    Pose, "/pose", 10
+                    self.get_pose_type_for_robot(robot_name), "/pose", 10
                 )
                 # cmd_vel publishers
                 self.cmd_vel_publishers[robot_name] = self.create_publisher(
@@ -56,7 +57,9 @@ class MultiRobot(Node):
             else:
                 # pose publisher
                 self.pose_publishers[robot_name] = self.create_publisher(
-                    Pose, "/" + robot_name + "/pose", 10
+                    self.get_pose_type_for_robot(robot_name),
+                    "/" + robot_name + "/pose",
+                    10,
                 )
                 # cmd_vel publishers
                 self.cmd_vel_publishers[robot_name] = self.create_publisher(
@@ -78,6 +81,12 @@ class MultiRobot(Node):
 
         # Initialization ready
         self.publish_string("robot", self.initialization_publisher)
+
+    def get_pose_type_for_robot(self, robot_name):
+        # turtlesim pose topic must use turtlesim/Pose to avoid topic type collision
+        if robot_name.startswith("turtle"):
+            return TurtlePose
+        return GeometryPose
 
     def function_call_callback(self, request, response):
         req = json.loads(request.request_text)

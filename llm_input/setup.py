@@ -11,7 +11,9 @@ setup(
             ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
     ],
-    install_requires=['setuptools', 'llm_config'],
+    # NOTE: ROS package dependencies should be declared in package.xml,
+    # not in Python distribution requirements.
+    install_requires=['setuptools'],
     zip_safe=True,
     maintainer='hermanye',
     maintainer_email='hermanye233@icloud.com',

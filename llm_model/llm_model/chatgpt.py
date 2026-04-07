@@ -16,338 +16,283 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-# Description:
-# This code defines a ROS node called ChatGPTNode
-# The node interacts with the ChatGPT service to implement conversational interactions
-# The node implements the ChatGPT service callback function "llm_callback"
-# The node also includes a client function "function_call_client" and a publisher "output_publisher"
-# It also includes a function called "add_message_to_history" to update chat history records
-# The code generates a chat response using the OpenAI API
-# It extracts response information from the response data
-# The code writes chat history records to a JSON file using Python's JSON library
-# The code calls other functions using ROS Service
-#
-# Node test Method:
-# ros2 run llm_model chatgpt
-# ros2 topic echo /llm_feedback_to_user
-# ros2 topic pub /llm_input_audio_to_text std_msgs/msg/String "data: 'Hello,tell me a joke'" -1
-#
 # Author: Herman Ye @Auromix
 
-# ROS related
+import json
+import os
+import site
+import sys
+import time
+
+# ROS 2 Foxy typically exports PYTHONNOUSERSITE=1.
+# Append user site-packages explicitly so pip --user installs remain importable.
+user_site_packages = site.getusersitepackages()
+if user_site_packages and user_site_packages not in sys.path:
+    sys.path.append(user_site_packages)
+
+from openai import OpenAI
 import rclpy
 from rclpy.node import Node
 from llm_interfaces.srv import ChatGPT
 from std_msgs.msg import String
 
-# LLM related
-import json
-import os
-import time
-import openai
 from llm_config.user_config import UserConfig
 
 
-# Global Initialization
 config = UserConfig()
-openai.api_key = config.openai_api_key
-# openai.organization = config.openai_organization
 
 
 class ChatGPTNode(Node):
     def __init__(self):
         super().__init__("ChatGPT_node")
-        # Initialization publisher
+
         self.initialization_publisher = self.create_publisher(
-            String, "/llm_initialization_state", 0
+            String, "/llm_initialization_state", 10
         )
-
-        # LLM state publisher
-        self.llm_state_publisher = self.create_publisher(String, "/llm_state", 0)
-
-        # LLM state listener
+        self.llm_state_publisher = self.create_publisher(String, "/llm_state", 10)
         self.llm_state_subscriber = self.create_subscription(
-            String, "/llm_state", self.state_listener_callback, 0
+            String, "/llm_state", self.state_listener_callback, 10
         )
-        # LLM input listener
         self.llm_input_subscriber = self.create_subscription(
-            String, "/llm_input_audio_to_text", self.llm_callback, 0
+            String, "/llm_input_audio_to_text", self.llm_callback, 10
         )
-        # LLM response type publisher
         self.llm_response_type_publisher = self.create_publisher(
-            String, "/llm_response_type", 0
+            String, "/llm_response_type", 10
         )
-
-        # LLM feedback for user publisher
         self.llm_feedback_publisher = self.create_publisher(
-            String, "/llm_feedback_to_user", 0
+            String, "/llm_feedback_to_user", 10
         )
-        # ChatGPT function call client
-        # When function call is detected
-        # ChatGPT client will call function call service in robot node
+        self.output_publisher = self.create_publisher(String, "ChatGPT_text_output", 10)
+
         self.function_call_client = self.create_client(
             ChatGPT, "/ChatGPT_function_call_service"
         )
-        # self.function_call_future = None
-        # Wait for function call server to be ready
-        # while not self.function_call_client.wait_for_service(timeout_sec=1.0):
-        #     self.get_logger().info(
-        #         "ChatGPT Function Call Server(ROBOT NODE) not available, waiting again..."
-        #     )
-        self.function_call_requst = ChatGPT.Request()  # Function call request
-        self.get_logger().info("ChatGPT Function Call Server is ready")
 
-        # ChatGPT output publisher
-        # When feedback text to user is detected
-        # ChatGPT node will publish feedback text to output node
-        self.output_publisher = self.create_publisher(String, "ChatGPT_text_output", 10)
+        self.openai_api_key = os.getenv("OPENAI_API_KEY", config.openai_api_key or "")
+        self.openai_api_base = os.getenv("OPENAI_API_BASE", "")
+        self.openai_model = os.getenv("OPENAI_MODEL", config.openai_model)
 
-        # Chat history
-        # The chat history contains user & ChatGPT interaction information
-        # Chat history is stored in a JSON file in the user_config.chat_history_path
-        # There is a maximum word limit for chat history
-        # And the upper limit is user_config.chat_history_max_length
-        # TODO: Longer interactive content should be stored in the JSON file
-        # exceeding token limit, waiting to update @Herman Ye
+        self.openai_client = None
+        if not self.openai_api_key:
+            self.get_logger().error(
+                "OPENAI_API_KEY is empty. Please export OPENAI_API_KEY first."
+            )
+        else:
+            client_kwargs = {"api_key": self.openai_api_key}
+            if self.openai_api_base:
+                client_kwargs["base_url"] = self.openai_api_base
+            self.openai_client = OpenAI(**client_kwargs)
+            self.get_logger().info(
+                f"LLM client ready. model={self.openai_model}, base_url={self.openai_api_base or 'default'}"
+            )
+
+        self.robot_tools = self.convert_functions_to_tools(config.robot_functions_list)
+
+        self.chat_history = list(config.chat_history)
+        history_dir = config.chat_history_path
+        if not os.path.isdir(history_dir) or not os.access(history_dir, os.W_OK):
+            history_dir = "/tmp"
         self.start_timestamp = time.strftime("%Y-%m-%d-%H-%M-%S", time.localtime())
         self.chat_history_file = os.path.join(
-            config.chat_history_path, f"chat_history_{self.start_timestamp}.json"
+            history_dir, f"chat_history_{self.start_timestamp}.json"
         )
         self.write_chat_history_to_json()
-        self.get_logger().info(f"Chat history saved to {self.chat_history_file}")
 
-        # Function name
-        self.function_name = "null"
-        # Initialization ready
         self.publish_string("llm_model_processing", self.initialization_publisher)
 
     def state_listener_callback(self, msg):
-        self.get_logger().debug(f"model node get current State:{msg}")
-        # TODO
+        self.get_logger().debug(f"model node get current State: {msg.data}")
 
     def publish_string(self, string_to_send, publisher_to_use):
         msg = String()
-        msg.data = string_to_send
-
+        msg.data = "" if string_to_send is None else str(string_to_send)
         publisher_to_use.publish(msg)
         self.get_logger().info(
             f"Topic: {publisher_to_use.topic_name}\nMessage published: {msg.data}"
         )
 
-    def add_message_to_history(
-        self, role, content="null", function_call=None, name=None
-    ):
-        """
-        Add a new message_element_object to the chat history
-        with the given role, content, and function call information.
-        The message_element_object dictionary contains
-        the key-value pairs for "role", "content", and "function_call".
-        If the chat history exceeds the maximum allowed length,
-        the oldest message_element_object will be removed.
-        Returns the updated chat history list.
-        """
-        # Creating message dictionary with given options
-        message_element_object = {
-            "role": role,
-            "content": content,
-        }
-        # Adding function call information if provided
-        if name is not None:
-            message_element_object["name"] = name
-        # Adding function call information if provided
-        if function_call is not None:
-            message_element_object["function_call"] = function_call
-        # Adding message_element_object to chat history
-        config.chat_history.append(message_element_object)
-        # Log
-        self.get_logger().info(f"Chat history updated with {message_element_object}")
-        # Checking if chat history is too long
-        if len(config.chat_history) > config.chat_history_max_length:
-            self.get_logger().info(
-                f"Chat history is too long, popping the oldest message: {config.chat_history[0]}"
-            )
-            config.chat_history.pop(0)
-
-        # Returning updated chat history
-        return config.chat_history
-
-    def generate_chatgpt_response(self, messages_input):
-        """
-        Generates a chatgpt response based on the input messages provided.
-        All parameters can be found in the llm_config/user_config.py file.
-        """
-        # Log
-        self.get_logger().info(f"Sending messages to OpenAI: {messages_input}")
-        response = openai.ChatCompletion.create(
-            model=config.openai_model,
-            messages=messages_input,
-            functions=config.robot_functions_list,
-            function_call="auto",
-            # temperature=config.openai_temperature,
-            # top_p=config.openai_top_p,
-            # n=config.openai_n,
-            # stream=config.openai_stream,
-            # stop=config.openai_stop,
-            # max_tokens=config.openai_max_tokens,
-            # presence_penalty=config.openai_presence_penalty,
-            # frequency_penalty=config.openai_frequency_penalty,
-        )
-        # Log
-        self.get_logger().info(f"OpenAI response: {response}")
-        return response
-
-    def get_response_information(self, chatgpt_response):
-        """
-        Returns the response information from the chatgpt response.
-        The response information includes the message, text, function call, and function flag.
-        function_flag = 0: no function call, 1: function call
-        """
-        # Getting response information
-        message = chatgpt_response["choices"][0]["message"]
-        content = message.get("content")
-        function_call = message.get("function_call", None)
-
-        # Initializing function flag, 0: no function call, 1: function call
-        function_flag = 0
-
-        # If the content is not None, then the response is text
-        # If the content is None, then the response is function call
-        if content is not None:
-            function_flag = 0
-            self.get_logger().info("OpenAI response type: TEXT")
-        else:
-            function_flag = 1
-            self.get_logger().info("OpenAI response type: FUNCTION CALL")
-        # Log
-        self.get_logger().info(
-            f"Get message from OpenAI: {message}, type: {type(message)}"
-        )
-        self.get_logger().info(
-            f"Get content from OpenAI: {content}, type: {type(content)}"
-        )
-        self.get_logger().info(
-            f"Get function call from OpenAI: {function_call}, type: {type(function_call)}"
-        )
-
-        return message, content, function_call, function_flag
-
     def write_chat_history_to_json(self):
-        """
-        Write the chat history to a JSON file.
-        """
         try:
-            # Converting chat history to JSON string
-            json_data = json.dumps(config.chat_history)
-
-            # Writing JSON to file
+            json_data = json.dumps(self.chat_history, ensure_ascii=False)
             with open(self.chat_history_file, "w", encoding="utf-8") as file:
                 file.write(json_data)
-
-            self.get_logger().info("Chat history has been written to JSON")
             return True
-
         except IOError as error:
-            # Error writing chat history to JSON
             self.get_logger().error(f"Error writing chat history to JSON: {error}")
             return False
 
-    def function_call(self, function_call_input):
-        """
-        Sends a function call request with the given input and waits for the response.
-        When the response is received, the function call response callback is called.
-        """
-        # JSON object to string
-        function_call_input_str = json.dumps(function_call_input)
-        # Get function name
-        self.function_name = function_call_input["name"]
-        # Send function call request
-        self.function_call_requst.request_text = function_call_input_str
-        self.get_logger().info(
-            f"Request for ChatGPT_function_call_service: {self.function_call_requst.request_text}"
-        )
-        future = self.function_call_client.call_async(self.function_call_requst)
-        future.add_done_callback(self.function_call_response_callback)
+    def add_message_to_history(self, message):
+        self.chat_history.append(message)
+        if len(self.chat_history) > config.chat_history_max_length:
+            # keep the first message (system prompt) when truncating history
+            self.chat_history.pop(1 if len(self.chat_history) > 1 else 0)
 
-    def function_call_response_callback(self, future):
-        """
-        The function call response callback is called when the function call response is received.
-        the function_call_response_callback will call the gpt service again
-        to get the text response to user
-        """
-        try:
-            response = future.result()
-            self.get_logger().info(
-                f"Response from ChatGPT_function_call_service: {response}"
+    def convert_functions_to_tools(self, function_specs):
+        tools = []
+        seen_names = set()
+        for spec in function_specs:
+            if not isinstance(spec, dict):
+                continue
+            function_name = spec.get("name", "")
+            if not function_name or function_name in seen_names:
+                continue
+            seen_names.add(function_name)
+            tools.append(
+                {
+                    "type": "function",
+                    "function": {
+                        "name": function_name,
+                        "description": spec.get("description", ""),
+                        "parameters": spec.get(
+                            "parameters", {"type": "object", "properties": {}}
+                        ),
+                    },
+                }
             )
+        return tools
 
-        except Exception as e:
-            self.get_logger().info(f"ChatGPT function call service failed {e}")
+    def generate_chatgpt_response(self, enable_tools=True):
+        if self.openai_client is None:
+            raise RuntimeError("OPENAI client is not initialized.")
 
-        response_text = "null"
-        self.add_message_to_history(
-            role="function",
-            name=self.function_name,
-            content=str(response_text),
-        )
-        # Generate chat completion
-        second_chatgpt_response = self.generate_chatgpt_response(config.chat_history)
-        # Get response information
-        message, text, function_call, function_flag = self.get_response_information(
-            second_chatgpt_response
-        )
-        self.publish_string(text, self.llm_feedback_publisher)
+        request_kwargs = {
+            "model": self.openai_model,
+            "messages": self.chat_history,
+        }
+        if enable_tools and self.robot_tools:
+            request_kwargs["tools"] = self.robot_tools
+            request_kwargs["tool_choice"] = "auto"
+
+        return self.openai_client.chat.completions.create(**request_kwargs)
+
+    def extract_text_content(self, content):
+        if content is None:
+            return ""
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            text_parts = []
+            for item in content:
+                if isinstance(item, dict) and item.get("type") == "text":
+                    text_parts.append(item.get("text", ""))
+            return "".join(text_parts)
+        return str(content)
+
+    def tool_call_to_history_message(self, assistant_message):
+        tool_calls = []
+        for index, tool_call in enumerate(assistant_message.tool_calls):
+            tool_call_id = tool_call.id or f"tool_call_{index}"
+            tool_calls.append(
+                {
+                    "id": tool_call_id,
+                    "type": "function",
+                    "function": {
+                        "name": tool_call.function.name,
+                        "arguments": tool_call.function.arguments or "{}",
+                    },
+                }
+            )
+        return {"role": "assistant", "content": None, "tool_calls": tool_calls}
+
+    def call_robot_function_service(self, function_name, arguments_json):
+        if not self.function_call_client.wait_for_service(timeout_sec=2.0):
+            return "Function call service is unavailable."
+
+        req_payload = {
+            "name": function_name,
+            "arguments": arguments_json,
+        }
+        request = ChatGPT.Request()
+        request.request_text = json.dumps(req_payload, ensure_ascii=False)
+
+        future = self.function_call_client.call_async(request)
+        rclpy.spin_until_future_complete(self, future, timeout_sec=15.0)
+
+        if not future.done():
+            return "Function call timeout."
+        if future.result() is None:
+            return f"Function call failed: {future.exception()}"
+        return future.result().response_text
+
+    def handle_tool_calls(self, tool_calls):
+        for index, tool_call in enumerate(tool_calls):
+            function_name = tool_call.function.name
+            arguments_text = tool_call.function.arguments or "{}"
+            try:
+                arguments_obj = json.loads(arguments_text)
+                arguments_text = json.dumps(arguments_obj, ensure_ascii=False)
+            except json.JSONDecodeError:
+                arguments_text = "{}"
+
+            tool_result = self.call_robot_function_service(function_name, arguments_text)
+            tool_call_id = tool_call.id or f"tool_call_{index}"
+            tool_message = {
+                "role": "tool",
+                "tool_call_id": tool_call_id,
+                "name": function_name,
+                "content": str(tool_result),
+            }
+            self.add_message_to_history(tool_message)
+
+    def run_dialog(self):
+        enable_tools = True
+        for _ in range(3):
+            try:
+                response = self.generate_chatgpt_response(enable_tools=enable_tools)
+            except Exception as error:
+                if enable_tools and self.robot_tools:
+                    self.get_logger().warning(
+                        f"Tool mode request failed, retrying without tools: {error}"
+                    )
+                    enable_tools = False
+                    continue
+                raise
+
+            message = response.choices[0].message
+            if message.tool_calls:
+                self.publish_string("function_call", self.llm_response_type_publisher)
+                self.add_message_to_history(self.tool_call_to_history_message(message))
+                self.handle_tool_calls(message.tool_calls)
+                continue
+
+            reply_text = self.extract_text_content(message.content)
+            if not reply_text:
+                reply_text = "模型未返回文本内容。"
+            self.add_message_to_history({"role": "assistant", "content": reply_text})
+            return reply_text
+
+        return "工具调用轮次超出上限，任务已中止。"
 
     def llm_callback(self, msg):
-        """
-        The llm_callback function is called when the ChatGPT service is called.
-        llm_callback is the main function of the ChatGPT node.
-        """
-        # Log the llm_callback
         self.get_logger().info("STATE: model_processing")
-
-        self.get_logger().info(f"Input message received: {msg.data}")
-        # Add user message to chat history
         user_prompt = msg.data
-        self.add_message_to_history("user", user_prompt)
-        # Generate chat completion
-        chatgpt_response = self.generate_chatgpt_response(config.chat_history)
-        # Get response information
-        message, text, function_call, function_flag = self.get_response_information(
-            chatgpt_response
-        )
-        # Append response to chat history
-        self.add_message_to_history(
-            role="assistant", content=text, function_call=function_call
-        )
-        # Write chat history to JSON
+        self.get_logger().info(f"Input message received: {user_prompt}")
+
+        self.add_message_to_history({"role": "user", "content": user_prompt})
         self.write_chat_history_to_json()
 
-        # Log output_processing
-        self.get_logger().info("STATE: output_processing")
-        if function_flag == 1:
-            # Write response text to GPT service response
-            llm_response_type = "function_call"
-            self.publish_string(llm_response_type, self.llm_response_type_publisher)
+        try:
+            reply_text = self.run_dialog()
+        except Exception as error:
+            self.get_logger().error(f"Model request failed: {error}")
+            reply_text = f"模型调用失败: {error}"
 
-            # Robot function call
-            # Log function execution
-            self.get_logger().info("STATE: function_execution")
-            self.function_call(function_call)
-        else:
-            # Return text response
-            llm_response_type = "feedback_for_user"
-            # Log feedback_for_user
-            self.get_logger().info("STATE: feedback_for_user")
-            self.publish_string(llm_response_type, self.llm_response_type_publisher)
-            self.publish_string(text, self.llm_feedback_publisher)
-            # self.publish_string(json.dumps(text), self.llm_feedback_publisher)
+        self.write_chat_history_to_json()
+        self.publish_string("feedback_for_user", self.llm_response_type_publisher)
+        self.publish_string(reply_text, self.llm_feedback_publisher)
+        self.publish_string(reply_text, self.output_publisher)
 
 
 def main(args=None):
     rclpy.init(args=args)
     chatgpt = ChatGPTNode()
-    rclpy.spin(chatgpt)
-    rclpy.shutdown()
+    try:
+        rclpy.spin(chatgpt)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        chatgpt.destroy_node()
+        rclpy.shutdown()
 
 
 if __name__ == "__main__":

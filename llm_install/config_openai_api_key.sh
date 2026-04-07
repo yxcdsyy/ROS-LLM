@@ -17,41 +17,98 @@
 # limitations under the License.
 #
 # Description:
-# This script will add your OpenAI API_KEY to your .bashrc file.
+# This script will add your OpenAI-compatible API settings to your .bashrc file.
+# It supports Qwen / DashScope compatible mode.
 #
 # Author: Herman Ye @Auromix
+# Modified for OpenAI-compatible services
 
-echo "This script will add your OpenAI API_KEY to your .bashrc file."
+set -e
 
-# Ask user for OpenAI API key
-read -rp "Enter your OpenAI API key: " API_KEY
+echo "This script will add your OpenAI-compatible API settings to your ~/.bashrc file."
+echo ""
 
-# Check if OPENAI_API_KEY already exists in .bashrc file
-if grep -q "export OPENAI_API_KEY" ~/.bashrc; then
-  # Confirm with the user before removing the existing OPENAI_API_KEY
-  echo "Existing OPENAI_API_KEY found in .bashrc file."
-  read -rp "Are you sure you want to replace the existing OPENAI_API_KEY in your .bashrc file? (y/n) " confirm
-  if [[ "$confirm" =~ ^[Yy]$ ]]; then
-    # Remove existing OPENAI_API_KEY from .bashrc file
-    sed -i "/export OPENAI_API_KEY/d" "$HOME/.bashrc"
-    echo "Existing OPENAI_API_KEY was removed from .bashrc file."
-    # Append OPENAI_API_KEY to the end of .bashrc file
-    echo "export OPENAI_API_KEY=$API_KEY" >> "$HOME/.bashrc"
-    source "$HOME/.bashrc"
-    echo "Added OPENAI_API_KEY=$API_KEY to .bashrc file."
-    echo "Configuration complete."
-  else
-    echo "No changes were made."
-  fi
-else
-  # If OPENAI_API_KEY not found, add it to the end of .bashrc file
-  echo "export OPENAI_API_KEY=$API_KEY" >> "$HOME/.bashrc"
-  source "$HOME/.bashrc"
-  echo "Added OPENAI_API_KEY=$API_KEY to .bashrc file."
-  echo "Configuration complete."
+DEFAULT_API_BASE="https://dashscope.aliyuncs.com/compatible-mode/v1"
+DEFAULT_MODEL="qwen-plus-2025-07-28"
+
+read -rp "Enter your API key: " API_KEY
+read -rp "Enter your API base URL [default: ${DEFAULT_API_BASE}]: " API_BASE
+read -rp "Enter your model name [default: ${DEFAULT_MODEL}]: " MODEL_NAME
+
+API_BASE=${API_BASE:-$DEFAULT_API_BASE}
+MODEL_NAME=${MODEL_NAME:-$DEFAULT_MODEL}
+
+BASHRC_FILE="$HOME/.bashrc"
+
+echo ""
+echo "The following settings will be written:"
+echo "  OPENAI_API_KEY=${API_KEY}"
+echo "  OPENAI_API_BASE=${API_BASE}"
+echo "  OPENAI_MODEL=${MODEL_NAME}"
+echo ""
+
+read -rp "Continue? (y/n) " confirm_initial
+if [[ ! "$confirm_initial" =~ ^[Yy]$ ]]; then
+  echo "No changes were made."
+  exit 0
 fi
 
+remove_existing_config() {
+  sed -i '/export OPENAI_API_KEY=/d' "$BASHRC_FILE"
+  sed -i '/export OPENAI_API_BASE=/d' "$BASHRC_FILE"
+  sed -i '/export OPENAI_MODEL=/d' "$BASHRC_FILE"
+}
 
-# Wait for user to exit
+append_new_config() {
+  {
+    echo ""
+    echo "# OpenAI-compatible API configuration for ROS-LLM"
+    echo "export OPENAI_API_KEY=\"${API_KEY}\""
+    echo "export OPENAI_API_BASE=\"${API_BASE}\""
+    echo "export OPENAI_MODEL=\"${MODEL_NAME}\""
+  } >> "$BASHRC_FILE"
+}
+
+HAS_KEY=0
+HAS_BASE=0
+HAS_MODEL=0
+
+grep -q 'export OPENAI_API_KEY=' "$BASHRC_FILE" && HAS_KEY=1
+grep -q 'export OPENAI_API_BASE=' "$BASHRC_FILE" && HAS_BASE=1
+grep -q 'export OPENAI_MODEL=' "$BASHRC_FILE" && HAS_MODEL=1
+
+if [[ $HAS_KEY -eq 1 || $HAS_BASE -eq 1 || $HAS_MODEL -eq 1 ]]; then
+  echo "Existing OpenAI-compatible environment variables were found in ${BASHRC_FILE}."
+  read -rp "Are you sure you want to replace them? (y/n) " confirm_replace
+  if [[ "$confirm_replace" =~ ^[Yy]$ ]]; then
+    remove_existing_config
+    append_new_config
+    echo "Existing configuration was replaced."
+  else
+    echo "No changes were made."
+    exit 0
+  fi
+else
+  append_new_config
+  echo "Configuration was added."
+fi
+
+# Load settings for current shell session
+export OPENAI_API_KEY="${API_KEY}"
+export OPENAI_API_BASE="${API_BASE}"
+export OPENAI_MODEL="${MODEL_NAME}"
+
+echo ""
+echo "Configuration complete."
+echo "Current session has been updated with:"
+echo "  OPENAI_API_KEY=${OPENAI_API_KEY}"
+echo "  OPENAI_API_BASE=${OPENAI_API_BASE}"
+echo "  OPENAI_MODEL=${OPENAI_MODEL}"
+echo ""
+echo "To apply these settings in a new terminal, run:"
+echo "  source ~/.bashrc"
+echo ""
+
 read -n 1 -r -p "Press any key to exit..."
+echo ""
 exit 0
